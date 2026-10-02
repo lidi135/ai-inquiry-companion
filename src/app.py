@@ -1117,7 +1117,8 @@ with tab_train:
             latest_dims = latest.get("分维度得分") or {}
             if latest_dims:
                 st.write("**能力雷达图（最近一次）**")
-                st.pyplot(_plot_radar(latest_dims))
+                fig = _plot_radar(latest_dims)
+                st.pyplot(fig)
 
 
 # 每次交互结束落盘会话状态，支持刷新/重进续答
