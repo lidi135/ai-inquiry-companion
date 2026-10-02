@@ -24,6 +24,11 @@
 | F10 | 实验评测可视化 | benchmark 评测指标柱状图（`eval/visualize.py`，懒加载 matplotlib） |
 | F11 | 标准化评测数据集 | 6 套分科室 MCQ（各 40 题，共 240 题，A/B/C/D 四选项 + 答案） |
 | F12 | 一键评测脚本 | `run_benchmark_all.py` 串联多模型 × 多数据集评测与零样本迁移衰减矩阵 |
+| F13 | 实时评分反馈 | 问诊每累计 3 轮触发规则中间评分，以「已覆盖 / 建议补问」标签实时提示补问维度 |
+| F14 | SOAP 笔记训练 | 独立 Tab 填写 S/O/A/P 四段笔记，按 4×25 分启发式评分并导出报告 |
+| F15 | 教师视图 | 独立 Tab 聚合全班训练记录：记录数/学生数/平均总分/总分趋势/弱项 TOP5/历史表 |
+| F16 | 医学同义词扩展 | 30+ 组中文医学口语化同义词（如「血糖高→糖尿病」），提升规则评分覆盖度匹配 |
+| F17 | 提示词外提与 A/B | System Prompt 外提到 `src/prompts/`，支持 `PROMPT_VERSION` 环境变量切换版本做实验 |
 
 ## 二、目录结构
 
@@ -35,18 +40,27 @@ AI/
 │   ├── core/                     # 核心算法包
 │   │   ├── config.py             # 全局配置与多模型注册
 │   │   ├── case_loader.py        # 病例库加载与校验
-│   │   ├── role_engine.py        # 角色引擎（VSP）
-│   │   ├── scoring_engine.py     # 评分引擎（规则 + LLM）
+│   │   ├── case_generator.py     # AI 生成病例（DeepSeek 半自动 + 缓存去重）
+│   │   ├── role_engine.py        # 角色引擎（VSP + 角色一致性加固）
+│   │   ├── scoring_engine.py     # 评分引擎（规则 + LLM + 评分可解释性）
+│   │   ├── soap_rubric.py        # SOAP 评分量表（4×25）
+│   │   ├── soap_scorer.py        # SOAP 笔记启发式评分
+│   │   ├── synonyms.py           # 医学同义词扩展（覆盖度匹配）
+│   │   ├── prompt_registry.py    # 提示词注册表（外提 + 版本化 A/B）
+│   │   ├── teacher.py            # 教师视图（班级聚合统计）
 │   │   └── records.py            # 训练记录持久化
 │   ├── eval/                     # 实验评测包
 │   │   ├── metrics.py            # 评估指标
 │   │   ├── benchmark.py          # 多模型评测与零样本迁移
 │   │   ├── visualize.py          # 评测指标可视化（懒加载 matplotlib）
 │   │   └── imbalance.py          # 不平衡样本处理实验
+│   ├── prompts/                  # 提示词模板（role/scoring/generation + schema）
 │   ├── cases/                    # 病例库（JSON，P01–P17）
-│   ├── tests/                    # 单元/集成测试（pytest，56 项）
+│   ├── tests/                    # 单元/集成测试（pytest，110 项）
 │   └── .streamlit/secrets.toml.example  # 密钥配置模板
 ├── data/                         # 标准化 MCQ 评测数据集（6 套 × 40 题）
+├── scripts/                      # 辅助脚本（病例一致性审计）
+│   └── audit_cases.py            # 病例库字段覆盖/去重/合法性审计
 ├── run_benchmark_all.py          # 一键多模型 × 多数据集评测脚本
 ├── pyproject.toml                # 项目元数据 + ruff/mypy/coverage 配置
 ├── pytest.ini                    # pytest 配置
@@ -135,6 +149,17 @@ python -m pytest tests/ -v
 - **规则评分（默认）**：基于病例病史信息点覆盖度的启发式打分，可离线运行；
 - **LLM 智能评分**：调用大模型按 Rubric 结构化打分（需勾选并配置 API Key），输出更细致的优点/不足/建议。
 
+### 4.5 SOAP 笔记训练
+
+1. 切换到「📝 SOAP 笔记」Tab；
+2. 针对当前病例分别填写 **S（主观）/ O（客观）/ A（评估）/ P（计划）** 四段笔记；
+3. 点击「评分」查看 4 维（各 25 分，总分 100）启发式评分与下载报告。
+
+### 4.6 教师视图
+
+1. 切换到「👨‍🏫 教师视图」Tab；
+2. 查看全班聚合统计：记录数、学生数、平均总分、总分趋势、班级弱项 TOP5 与训练历史表（按 `class_id` 切分，默认 `default`）。
+
 ---
 
 ## 五、API 文档
@@ -192,7 +217,18 @@ python -m pytest tests/ -v
 | `load_session() -> dict \| None` | 读取当前会话状态 |
 | `clear_session() -> None` | 清除当前会话 |
 
-### 5.6 eval（实验评测）
+### 5.6 core.soap_scorer / core.teacher / core.synonyms / core.prompt_registry / core.case_generator
+
+| 模块 | 说明 |
+| --- | --- |
+| `soap_scorer.score_soap(case, subjective, objective, assessment, plan)` | SOAP 4 维启发式评分（各 25 分） |
+| `teacher.load_class_overview(class_id)` | 班级聚合统计（记录数/学生数/平均总分/趋势/维度均值） |
+| `teacher.dim_loss_ranking(class_id, top_n)` | 班级弱项维度按失分降序排名 |
+| `synonyms.expand_term(term)` / `contains_any(text, candidates)` | 医学同义词扩展与包含判断 |
+| `prompt_registry.get(name, version)` / `get_schema(version)` | 按版本读取提示词（回退 default） |
+| `case_generator.generate_case(department, difficulty, ...)` | DeepSeek 生成病例（校验 + 缓存去重） |
+
+### 5.7 eval（实验评测）
 
 | 模块 | 说明 |
 | --- | --- |
@@ -232,7 +268,7 @@ python -m pytest tests/ -v
 
 ### 6.4 测试与 CI
 
-测试使用 pytest（共 **73 项**），位于 `src/tests/`，覆盖病例加载、评分引擎、评估指标、不平衡处理、多模型评测解析、训练记录/会话持久化、评分报告导出、诊断剧透检测、评测可视化等模块。开发依赖位于 `requirements-dev.txt`（pytest、pytest-cov、ruff、mypy）：
+测试使用 pytest（共 **110 项**），位于 `src/tests/`，覆盖病例加载与校验、评分引擎（规则/LLM/可解释性）、医学同义词、SOAP 评分、教师视图、提示词注册、病例生成、角色引擎与安全校验、评估指标、不平衡处理、多模型评测解析、训练记录/会话持久化、评分报告导出、诊断剧透检测、评测可视化、应用冒烟测试等模块。开发依赖位于 `requirements-dev.txt`（pytest、pytest-cov、ruff、mypy）：
 
 ```bash
 cd src && python -m pytest tests/ -v                        # 全量测试
