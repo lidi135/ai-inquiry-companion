@@ -449,8 +449,8 @@ st.sidebar.title("🩺 AI 问诊陪练助手")
 
 st.sidebar.markdown('<div style="font-size:.85rem;color:#5C7280;margin-bottom:10px;">面向医学生的虚拟标准化病人（VSP）训练系统</div>', unsafe_allow_html=True)
 
-cases = _load_cases()
-# 合并手写病例 + 用户在本次会话中临时生成的病例
+cases = dict(_load_cases())
+# 合并手写病例 + 用户在本次会话中临时生成的病例（复制副本，避免污染 cache_data 缓存）
 cases.update(st.session_state._extra_cases)
 if not cases:
     st.sidebar.warning("未在 cases/ 目录下找到病例 JSON，请先准备病例库。")
@@ -546,7 +546,7 @@ with st.sidebar.expander("AI 生成新病例（DeepSeek）", expanded=False):
         except Exception as e:
             st.error(f"生成失败：{e}")
 
-if st.session_state.last_generated and not st.session_state.get("_gen_btn_clicked"):
+if st.session_state.last_generated:
     st.sidebar.caption(f"📌 {st.session_state.last_generated}")
 
 
@@ -1048,8 +1048,13 @@ with tab_teacher:
 # ---------------------------------------------------------------------------
 # 个人成长档案（保留在 Tab 1 末尾，避免破坏老路径）
 # ---------------------------------------------------------------------------
-def _plot_radar(dimensions: dict[str, float]):
-    """基于分维度得分绘制能力雷达图（matplotlib 极坐标）。"""
+def _plot_radar(dimensions: Mapping[str, object]):
+    """基于分维度得分绘制能力雷达图（matplotlib 极坐标）。
+
+    兼容两种「分维度得分」格式：
+        * 纯数字：``{"询问主诉": 80.0}``（旧记录）；
+        * 嵌套 dict：``{"询问主诉": {"得分": 80.0, ...}}``（DimensionDetail 序列化）。
+    """
     import math
 
     import matplotlib
@@ -1067,7 +1072,17 @@ def _plot_radar(dimensions: dict[str, float]):
     plt.rcParams["axes.unicode_minus"] = False
 
     labels = list(dimensions.keys())
-    values = [float(dimensions[k]) for k in labels]
+    values: list[float] = []
+    for k in labels:
+        v = dimensions[k]
+        if isinstance(v, dict):
+            raw = v.get("得分", v.get("score", 0.0))
+        else:
+            raw = v
+        try:
+            values.append(float(raw))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            values.append(0.0)
     n = len(labels)
     angles = [i / n * 2 * math.pi for i in range(n)]
     values += values[:1]
