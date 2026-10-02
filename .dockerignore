@@ -1,0 +1,23 @@
+# Git / IDE
+.git/
+.idea/
+.vscode/
+
+# Python 缓存与虚拟环境
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 敏感信息与运行产物（严禁打入镜像）
+**/records/
+**/secrets.toml
+benchmark_result.json
+
+# 文档与本地生成物
+*.docx
+*.md
+豆包大纲.doc

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 敏感信息与用户数据（严禁提交）
+**/secrets.toml
+records/
+
+# 评测结果产物
+benchmark_result.json
+
+# IDE / OS
+.vscode/
+.idea/
+.trae/
+.DS_Store

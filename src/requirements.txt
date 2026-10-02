@@ -1,0 +1,17 @@
+# AI 问诊陪练助手 —— 运行时依赖（版本已锁定，保证可复现构建）
+# 安装：pip install -r requirements.txt
+#
+# 开发 / 测试 / 代码质量工具见项目根目录 requirements-dev.txt
+
+# Web 界面
+streamlit==1.64.0
+
+# 大模型调用（OpenAI 兼容接口）
+openai==3.22.1
+
+# 评测可视化（懒加载）
+matplotlib==3.11.2
+
+# 文档 / 报告生成脚本依赖（gen_docx.py / gen_report.py）
+numpy==2.5.3
+python-docx==1.2.0

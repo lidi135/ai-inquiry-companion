@@ -1,0 +1,20 @@
+{
+  "_doc": "AI 病例生成 JSON schema 提示片段，由 prompt_registry 注入到 generation prompt。",
+  "type": "object",
+  "required": ["case_id", "主诉", "诊断", "科室", "难度", "病史", "评分维度"],
+  "properties": {
+    "case_id": {"type": "string", "description": "病例编号，如 P18"},
+    "主诉": {"type": "string"},
+    "评分属性": {"type": "string"},
+    "科室": {"type": "string"},
+    "难度": {"enum": ["易", "中", "难"]},
+    "患者画像": {"type": "object"},
+    "现病史": {"type": "string"},
+    "既往史": {"type": "string"},
+    "个人史": {"type": "string"},
+    "婚育史": {"type": "string"},
+    "家族史": {"type": "string"},
+    "诊断": {"type": "string"},
+    "评分维度": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,12 @@
+# 开发 / 测试 / 代码质量依赖（生产运行仅需 src/requirements.txt）
+# 安装：pip install -r requirements-dev.txt
+
+# 测试
+pytest==9.1.1
+pytest-cov==7.1.0
+
+# 代码风格与静态检查
+ruff==0.16.10
+
+# 渐进式类型检查
+mypy==2.4.0
