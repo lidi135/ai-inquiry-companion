@@ -36,9 +36,18 @@
    （任何其他需要注入的密钥同理配置）
 5. 点 **Deploy!**。首次会拉依赖，1-3 分钟后状态变绿，得到公网 URL。
 
+## 当前公网地址（已验证可用）
+
+```
+https://ai-inquiry-companion-lpqczxpzvtmerht4oddokv.streamlit.app/
+```
+
+复制上述链接给任何人都能用。**注意**：每个 Streamlit Cloud 应用的实际 URL 后缀是部署时随机生成的短哈希，请以你 share.streamlit.io 控制台「My apps」里显示的 URL 为准。
+
 ## 验证
 - 打开 App URL，应能看到 Hero 头图与三 Tab 界面。
 - 在侧边栏选个模型，发一句问诊，得到 AI 病人回复 → 说明“API 密钥 + 部署”都成功。
+- 公网匿名访问测试（从本人电脑）已通过 `Invoke-WebRequest` 返回 `STATUS=200`。
 
 ## 常见问题
 - **访问慢/休眠**：免费版空闲会休眠，第一次访问会自动唤醒（3-5 秒）。
