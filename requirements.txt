@@ -1,0 +1,15 @@
+# AI 问诊陪练助手 —— 运行时依赖（Streamlit Cloud 部署用）
+# 与 src/requirements.txt 保持一致；生产运行仅需以下依赖，版本已锁定
+
+# Web 界面
+streamlit==1.64.0
+
+# 大模型调用（OpenAI 兼容接口）
+openai==3.22.1
+
+# 评测可视化（懒加载）
+matplotlib==3.11.2
+
+# 文档 / 报告生成脚本依赖（gen_docx.py / gen_report.py）
+numpy==2.5.3
+python-docx==1.2.0
