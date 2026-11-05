@@ -27,8 +27,9 @@
 | F13 | 实时评分反馈 | 问诊每累计 3 轮触发规则中间评分，以「已覆盖 / 建议补问」标签实时提示补问维度 |
 | F14 | SOAP 笔记训练 | 独立 Tab 填写 S/O/A/P 四段笔记，按 4×25 分启发式评分并导出报告 |
 | F15 | 教师视图 | 独立 Tab 聚合全班训练记录：记录数/学生数/平均总分/总分趋势/弱项 TOP5/历史表 |
-| F16 | 医学同义词扩展 | 30+ 组中文医学口语化同义词（如「血糖高→糖尿病」），提升规则评分覆盖度匹配 |
+| F16 | 医学同义词扩展 | 30+ 组中文医学口语化同义词（如「血糖高→糖尿病」），按词族扩展后参与整句信息点匹配 |
 | F17 | 提示词外提与 A/B | System Prompt 外提到 `src/prompts/`，支持 `PROMPT_VERSION` 环境变量切换版本做实验 |
+| F18 | 严格角色安全模式 | 考试模式默认开启；回复先完整生成并校验诊断泄露/医生化话术，再展示给用户 |
 
 ## 二、目录结构
 
@@ -56,7 +57,7 @@ AI/
 │   │   └── imbalance.py          # 不平衡样本处理实验
 │   ├── prompts/                  # 提示词模板（role/scoring/generation + schema）
 │   ├── cases/                    # 病例库（JSON，P01–P17）
-│   ├── tests/                    # 单元/集成测试（pytest，110 项）
+│   ├── tests/                    # 单元/集成测试（pytest，130 项）
 │   └── .streamlit/secrets.toml.example  # 密钥配置模板
 ├── data/                         # 标准化 MCQ 评测数据集（6 套 × 40 题）
 ├── scripts/                      # 辅助脚本（病例一致性审计）
@@ -93,6 +94,8 @@ DEEPSEEK_API_KEY = "your-deepseek-key"
 DASHSCOPE_API_KEY = "your-qwen-key"
 ZHIPU_API_KEY = "your-glm-key"
 OPENAI_API_KEY = "your-openai-key"
+# 可选：教师视图口令；未配置时教师视图为开放模式
+TEACHER_PASSWORD = "your-teacher-password"
 ```
 
 > 密钥文件请勿提交到公开仓库。未配置 API Key 时仅「规则评分」可用，问答对话会提示配置密钥。默认调用 `deepseek-v4-flash`（DeepSeek 经济档），可在 `src/core/config.py` 的 `DEFAULT_MODEL` / `MODEL_REGISTRY` 中切换。
@@ -140,14 +143,14 @@ python -m pytest tests/ -v
 
 页面底部的「个人成长档案」折叠区展示：
 
-- **历史训练记录**：时间、病例、模式、总分列表；
+- **历史训练记录**：时间、病例、模式、总分列表（填写学号后跨浏览器可见；未填写时按浏览器会话隔离）；
 - **总分趋势**：历次得分折线图；
 - **能力雷达图**：最近一次评分各维度得分雷达图。
 
 ### 4.4 评分说明
 
 - **规则评分（默认）**：基于病例病史信息点覆盖度的启发式打分，可离线运行；
-- **LLM 智能评分**：调用大模型按 Rubric 结构化打分（需勾选并配置 API Key），输出更细致的优点/不足/建议。
+- **LLM 智能评分**：调用大模型按 Rubric 结构化打分（需勾选并配置 API Key），评分 Prompt 会附带本例评分要点与参考诊断（仅考官可见），输出更细致的优点/不足/建议。
 
 ### 4.5 SOAP 笔记训练
 
@@ -157,8 +160,9 @@ python -m pytest tests/ -v
 
 ### 4.6 教师视图
 
-1. 切换到「👨‍🏫 教师视图」Tab；
-2. 查看全班聚合统计：记录数、学生数、平均总分、总分趋势、班级弱项 TOP5 与训练历史表（按 `class_id` 切分，默认 `default`）。
+1. 在侧边栏填写**学号 / 班级编号**（学生填写后，记录才会归入对应学生与班级）；
+2. 切换到「👨‍🏫 教师视图」Tab，查看全班聚合统计：记录数、学生数、平均总分、总分趋势、班级弱项 TOP5 与训练历史表（按侧边栏的班级编号切分，默认 `default`）；
+3. 若配置了 `TEACHER_PASSWORD`（环境变量或 secrets.toml），教师视图会先要求输入口令；未配置时为本地演示的开放模式。
 
 ---
 
@@ -192,6 +196,7 @@ python -m pytest tests/ -v
 | `build_messages(case, history) -> list[dict]` | 组装 system + 历史对话消息 |
 | `create_client(model_key, api_key=None) -> OpenAI` | 创建 OpenAI 兼容客户端 |
 | `generate_patient_reply(client, case, ...) -> str` | 生成患者回复 |
+| `generate_safe_patient_reply(client, case, ...) -> str` | 带诊断泄露/医生化话术后置校验与自动重试的安全回复 |
 | `stream_patient_reply(client, case, history=None, ...) -> Iterator[str]` | 以流式逐段生成患者回复（打字机效果） |
 | `diagnosis_terms(case) -> list[str]` | 提取诊断关键词（用于剧透检测） |
 | `detect_diagnosis_leak(case, history=None) -> list[str]` | 检测对话中的诊断泄露关键词 |
@@ -211,11 +216,12 @@ python -m pytest tests/ -v
 
 | 函数 | 说明 |
 | --- | --- |
-| `save_record(result, case, *, mode="技能训练") -> Path` | 保存一次评分记录到 `RECORDS_DIR` |
-| `load_history() -> list[dict]` | 按时间顺序读取全部历史记录 |
-| `save_session(state) -> None` | 保存当前会话状态（刷新续答） |
-| `load_session() -> dict \| None` | 读取当前会话状态 |
-| `clear_session() -> None` | 清除当前会话 |
+| `save_record(result, case, *, mode, student_id, class_id, session_id) -> Path` | 保存一次评分记录到 `RECORDS_DIR` |
+| `load_history(*, student_id=None, class_id=None, session_id=None) -> list[dict]` | 按时间顺序读取历史记录，可按学生/班级/会话过滤 |
+| `migrate_legacy_session(session_id="default", *, expected_case_id=None) -> dict \| None` | 把旧版 `_session/current.json` 一次性迁移到按会话隔离的新文件；病例不匹配时保留旧文件 |
+| `save_session(state, session_id="default") -> None` | 保存指定浏览器会话的状态（刷新续答） |
+| `load_session(session_id="default") -> dict \| None` | 读取指定会话状态 |
+| `clear_session(session_id="default") -> None` | 清除指定会话 |
 
 ### 5.6 core.soap_scorer / core.teacher / core.synonyms / core.prompt_registry / core.case_generator
 
@@ -268,11 +274,11 @@ python -m pytest tests/ -v
 
 ### 6.4 测试与 CI
 
-测试使用 pytest（共 **110 项**），位于 `src/tests/`，覆盖病例加载与校验、评分引擎（规则/LLM/可解释性）、医学同义词、SOAP 评分、教师视图、提示词注册、病例生成、角色引擎与安全校验、评估指标、不平衡处理、多模型评测解析、训练记录/会话持久化、评分报告导出、诊断剧透检测、评测可视化、应用冒烟测试等模块。开发依赖位于 `requirements-dev.txt`（pytest、pytest-cov、ruff、mypy）：
+测试使用 pytest（共 **130 项**），位于 `src/tests/`，覆盖病例加载与校验、评分引擎（规则/LLM/可解释性）、医学同义词、SOAP 评分、教师视图、提示词注册、病例生成、角色引擎与安全校验、评估指标、不平衡处理、多模型评测解析、训练记录/会话持久化、评分报告导出、诊断剧透检测、评测可视化、应用冒烟测试等模块。开发依赖位于 `requirements-dev.txt`（pytest、pytest-cov、ruff、mypy）：
 
 ```bash
-cd src && python -m pytest tests/ -v                        # 全量测试
-python -m pytest --cov=src/core --cov=src/eval tests/        # 附覆盖率报告
+python -m pytest -v src/tests                              # 在项目根目录执行全量测试
+python -m pytest --cov=src/core --cov=src/eval src/tests   # 附覆盖率报告
 ```
 
 > GitHub Actions CI（`.github/workflows/ci.yml`）在每次 push / PR 时自动执行 lint（ruff + mypy）与带覆盖率阈值的测试。

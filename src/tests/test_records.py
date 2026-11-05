@@ -7,6 +7,7 @@ from core.records import (
     clear_session,
     load_history,
     load_session,
+    migrate_legacy_session,
     save_record,
     save_session,
 )
@@ -96,3 +97,97 @@ def test_session_file_not_in_history(tmp_path, monkeypatch):
     save_session({"case_id": "P01"})
     # 会话文件放在独立子目录，不应被当作评分记录读取
     assert load_history() == []
+
+
+def test_sessions_are_isolated_by_session_id(tmp_path, monkeypatch):
+    """不同浏览器会话必须写入不同文件，不能互相覆盖。"""
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    save_session({"case_id": "P01", "messages": [{"role": "user", "content": "A"}]}, "sid-a")
+    save_session({"case_id": "P02", "messages": [{"role": "user", "content": "B"}]}, "sid-b")
+
+    assert load_session("sid-a")["case_id"] == "P01"
+    assert load_session("sid-b")["case_id"] == "P02"
+    assert load_session("sid-c") is None
+
+    clear_session("sid-a")
+    assert load_session("sid-a") is None
+    assert load_session("sid-b")["case_id"] == "P02"
+
+
+def test_migrate_legacy_session_only_once(tmp_path, monkeypatch):
+    """旧版 _session/current.json 应迁移到当前会话，且只迁移一次。"""
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    legacy_dir = tmp_path / "_session"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    legacy = legacy_dir / "current.json"
+    state = {"case_id": "P01", "messages": [{"role": "user", "content": "旧会话"}]}
+    legacy.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    migrated = migrate_legacy_session("sid-a")
+    assert migrated == state
+    assert load_session("sid-a") == state
+    assert not legacy.exists()
+    assert list(legacy_dir.glob("current_migrated_*.json"))
+
+    # 旧文件已归档，其他会话不会重复拿到同一份旧数据
+    assert migrate_legacy_session("sid-b") is None
+
+
+def test_migrate_legacy_session_without_legacy_file(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    assert migrate_legacy_session("sid-a") is None
+
+
+def test_migrate_legacy_session_respects_case_id(tmp_path, monkeypatch):
+    """旧会话不属于当前病例时不应迁移，避免旧数据被错误覆盖。"""
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    legacy_dir = tmp_path / "_session"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    legacy = legacy_dir / "current.json"
+    state = {"case_id": "P01", "messages": [{"role": "user", "content": "旧会话"}]}
+    legacy.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    assert migrate_legacy_session("sid-a", expected_case_id="P02") is None
+    assert legacy.exists()
+    assert migrate_legacy_session("sid-a", expected_case_id="P01") == state
+    assert not legacy.exists()
+
+
+def test_migrate_legacy_session_overwrites_empty_target(tmp_path, monkeypatch):
+    """目标会话只写了空状态时，仍应允许旧会话迁入，避免错过迁移。"""
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    save_session({"case_id": "P01", "messages": []}, "sid-a")
+    legacy_dir = tmp_path / "_session"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    legacy = legacy_dir / "current.json"
+    state = {"case_id": "P01", "messages": [{"role": "user", "content": "旧会话"}]}
+    legacy.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    migrated = migrate_legacy_session("sid-a")
+    assert migrated == state
+    assert load_session("sid-a") == state
+    assert not legacy.exists()
+
+
+def test_save_record_persists_identity_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    save_record(
+        _result(), _case(), student_id="alice", class_id="C1", session_id="sid-a"
+    )
+    record = load_history()[0]
+    assert record["student_id"] == "alice"
+    assert record["class_id"] == "C1"
+    assert record["session_id"] == "sid-a"
+
+
+def test_load_history_filters_by_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr("core.records.RECORDS_DIR", tmp_path)
+    save_record(_result(), _case(), student_id="alice", class_id="C1", session_id="sid-a")
+    save_record(_result(), _case(), student_id="bob", class_id="C1", session_id="sid-b")
+    save_record(_result(), _case(), student_id="bob", class_id="C2", session_id="sid-c")
+
+    assert len(load_history(student_id="alice")) == 1
+    assert len(load_history(class_id="C1")) == 2
+    assert len(load_history(session_id="sid-b")) == 1
+    assert len(load_history(student_id="bob", class_id="C2")) == 1
+    assert load_history(student_id="nobody") == []

@@ -16,6 +16,15 @@ records/
 # 评测结果产物
 benchmark_result.json
 
+# Node 依赖（PPT 构建脚本用，不入库）
+node_modules/
+
+# 提交材料 / 演示大文件（需要版本管理时请改用 Git LFS）
+陈佳瑶-提交材料/
+*.pptx
+*.zip
+豆包大纲.doc
+
 # IDE / OS
 .vscode/
 .idea/

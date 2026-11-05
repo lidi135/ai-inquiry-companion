@@ -44,6 +44,18 @@ def test_parse_generated_case_ok():
     assert len(case.scoring_points) >= 5
 
 
+def test_parse_generated_case_patient_profile():
+    payload = dict(_VALID_PAYLOAD)
+    payload["患者画像"] = {
+        "性别": "女", "年龄": 55, "职业": "农民", "文化": "初中文化",
+        "就诊状态": "门诊", "心理状态": "担心费用",
+    }
+    case = parse_generated_case(payload)
+    assert case.patient_profile["性别"] == "女"
+    assert case.patient_profile["年龄"] == 55
+    assert "生成时间" in case.patient_profile
+
+
 def test_parse_generated_case_missing_field():
     bad = dict(_VALID_PAYLOAD)
     del bad["诊断"]
@@ -118,6 +130,33 @@ def test_generate_case_cache_hit_skips_api(tmp_path, monkeypatch):
          patch("core.case_generator.load_all_cases", return_value={}):
         case = generate_case("心血管内科", "中", use_cache=True)
 
+    assert case.case_id == "P99"
+
+
+def test_generate_case_force_new_ignores_cache(tmp_path, monkeypatch):
+    """force_new=True 时必须绕过缓存重新调用模型。"""
+    monkeypatch.setattr("core.case_generator._CACHE_FILE",
+                        tmp_path / "cache.json")
+    key_payload = json.dumps(_VALID_PAYLOAD, ensure_ascii=False)
+    (tmp_path / "cache.json").write_text(
+        json.dumps({"心血管内科|中|": key_payload}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    mock_resp = MagicMock()
+    mock_resp.choices = [MagicMock()]
+    mock_resp.choices[0].message.content = json.dumps(
+        _VALID_PAYLOAD, ensure_ascii=False
+    )
+
+    with patch("core.case_generator.chat_completion",
+               return_value=mock_resp) as mock_chat, \
+         patch("core.case_generator.create_client",
+               return_value=MagicMock()), \
+         patch("core.case_generator.load_all_cases", return_value={}):
+        case = generate_case("心血管内科", "中", use_cache=True, force_new=True)
+
+    assert mock_chat.called
     assert case.case_id == "P99"
 
 

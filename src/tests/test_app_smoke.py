@@ -91,6 +91,9 @@ class _Sidebar:
     def checkbox(self, label, value=False, **k):
         return False
 
+    def text_input(self, label, value="", **k):
+        return value
+
     def button(self, label, **k):
         return False
 
@@ -132,6 +135,7 @@ def _make_streamlit_stub():
     st.chat_input = lambda *a, **k: None
     st.button = lambda *a, **k: False
     st.checkbox = lambda *a, **k: False
+    st.text_input = lambda *a, **k: ""
     def _selectbox_top(label, options, index=0, **k):
         return options[0] if isinstance(options, (list, tuple)) else options
 
@@ -175,9 +179,9 @@ def streamlit_stub(monkeypatch):
     monkeypatch.setitem(sys.modules, "streamlit", stub)
     # 隔离持久化副作用：冒烟测试不得写入真实 records 目录
     import core.records as records
-    monkeypatch.setattr(records, "save_session", lambda state: None)
-    monkeypatch.setattr(records, "load_session", lambda: None)
-    monkeypatch.setattr(records, "clear_session", lambda: None)
+    monkeypatch.setattr(records, "save_session", lambda state, session_id="default": None)
+    monkeypatch.setattr(records, "load_session", lambda session_id="default": None)
+    monkeypatch.setattr(records, "clear_session", lambda session_id="default": None)
     return stub
 
 

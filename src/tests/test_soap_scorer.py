@@ -60,6 +60,18 @@ def test_objective_long_text_full_score():
     assert result.dimensions["O - 客观资料"].score == 25.0
 
 
+def test_objective_filler_text_does_not_get_full_score():
+    filler = "这里只是随便写一些内容和字数" * 5
+    result = score_soap(_case(), "", filler)
+    assert result.dimensions["O - 客观资料"].score < 15.0
+
+
+def test_plan_filler_text_does_not_get_full_score():
+    filler = "这里只是随便写一些计划内容" * 5
+    result = score_soap(_case(), "腹痛", plan=filler)
+    assert result.dimensions["P - 处理计划"].score < 15.0
+
+
 def test_assessment_matching_diagnosis():
     case = _case()
     result = score_soap(case, "腹痛", assessment=case.diagnosis)

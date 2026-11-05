@@ -69,6 +69,14 @@ _JSON_SCHEMA_HINT = """{
   "诊断": "最终诊断（≤12 字）",
   "科室": "科室名，例如：消化内科",
   "难度": "易 / 中 / 难（三选一）",
+  "患者画像": {
+    "性别": "男 / 女",
+    "年龄": 数字,
+    "职业": "如：农民 / 教师 / 退休",
+    "文化": "如：初中文化",
+    "就诊状态": "门诊 / 住院 / 急诊",
+    "心理状态": "如：紧张 / 焦虑 / 担心费用"
+  },
   "病史": {
     "现病史": "症状发展、伴随、诊治经过（150-300 字）",
     "既往史": "既往疾病/手术/过敏史（可为空字符串）",
@@ -153,16 +161,24 @@ def parse_generated_case(payload: dict[str, Any]) -> Case:
         raise CaseLoadError(f"生成病例难度非法：{difficulty!r}")
     history = payload["病史"] if isinstance(payload["病史"], dict) else {}
     scoring_points = payload["评分维度"] if isinstance(payload["评分维度"], list) else []
+    raw_profile = payload.get("患者画像") or {}
+    if isinstance(raw_profile, dict):
+        profile = {str(k): v for k, v in raw_profile.items()}
+    elif raw_profile:
+        profile = {"描述": str(raw_profile)}
+    else:
+        profile = {}
+    profile["生成时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     case = Case(
         case_id=str(payload["case_id"]),
         chief_complaint=str(payload["主诉"]),
         scoring_category="问诊评分",
         department=str(payload["科室"]),
         difficulty=difficulty,
+        patient_profile=profile,
         history={str(k): str(v) for k, v in history.items()},
         diagnosis=str(payload["诊断"]),
         scoring_points=[str(x) for x in scoring_points],
-        patient_profile={"生成时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
     )
     problems = validate_case(case)
     if problems:
@@ -233,6 +249,7 @@ def generate_case(
     *,
     model_key: str = "deepseek",
     use_cache: bool = True,
+    force_new: bool = False,
     existing: dict[str, Case] | None = None,
 ) -> Case:
     """生成 1 例病例；优先复用缓存，缺失则调用 DeepSeek。
@@ -242,6 +259,7 @@ def generate_case(
         difficulty: "易" / "中" / "难"。
         model_key: 模型注册键（默认 deepseek = 最便宜的 deepseek-v4-flash）。
         use_cache: True 时命中缓存直接返回，不调 API。
+        force_new: True 时忽略缓存，强制生成一例新病例（仍会写回缓存）。
         existing: 已加载的病例字典（用于去重）；缺省时从 CASES_DIR 全量加载。
 
     Returns:
@@ -262,7 +280,7 @@ def generate_case(
     # 缓存 key 形如 "科室|难度|主诉哈希"，前缀（科室|难度）用于按维度命中
     cache_prefix = f"{department}|{difficulty}|"
     cached_payload: dict[str, Any] | None = None
-    if use_cache:
+    if use_cache and not force_new:
         for k, v in cache.items():
             if k.startswith(cache_prefix):
                 cached_payload = v

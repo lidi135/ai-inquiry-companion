@@ -69,9 +69,13 @@ def compute_metrics(
             accuracy=0.0, macro_f1=0.0, micro_f1=0.0, weighted_f1=0.0,
         )
 
-    # 确定类别顺序
-    if labels is None:
-        labels = list(dict.fromkeys(list(y_true) + list(y_pred)))
+    # 确定类别顺序：显式传入的 labels 也允许追加未知预测标签，
+    # 避免模型输出非法选项时直接 KeyError 中断整轮评测。
+    merged_labels = list(labels) if labels is not None else []
+    for lab in list(y_true) + list(y_pred):
+        if lab not in merged_labels:
+            merged_labels.append(lab)
+    labels = merged_labels
     label_index = {lab: i for i, lab in enumerate(labels)}
     n = len(labels)
 

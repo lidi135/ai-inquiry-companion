@@ -124,6 +124,10 @@ def create_client(model_key: str = "deepseek", api_key: str | None = None, **kwa
             f"未找到 {cfg.name} 的 API Key，请设置环境变量 {cfg.api_key_env}"
             " 或在 .streamlit/secrets.toml 中配置同名变量"
         )
+    # 统一设置单次请求超时，并关闭 SDK 自带重试：重试策略由 chat_completion
+    # 的指数退避统一负责，避免「SDK 2 次 × 自定义 3 次」放大成十余次请求。
+    kwargs.setdefault("timeout", 60.0)
+    kwargs.setdefault("max_retries", 0)
     return OpenAI(api_key=key, base_url=cfg.base_url, **kwargs)
 
 
@@ -161,8 +165,12 @@ def chat_completion(
 
     默认关闭思考模式（thinking=False）：本项目只读取 content，关闭后可
     省 token、降延迟；需要思维链时传 thinking=True 开启。
+
+    注意：``thinking`` 是 DeepSeek 的私有请求字段，不能下发给 OpenAI /
+    Qwen / GLM 等其他兼容接口，否则可能触发 400 未知参数错误。
     """
-    if not thinking:
+    model_name = str(kwargs.get("model") or DEFAULT_MODEL).lower()
+    if not thinking and "deepseek" in model_name:
         # DeepSeek 通过 extra_body 的 thinking.type 控制思考模式开关
         extra = dict(kwargs.pop("extra_body", None) or {})
         extra["thinking"] = {"type": "disabled"}
@@ -323,19 +331,26 @@ def _looks_like_doctor(text: str) -> bool:
     return any(p in norm for p in _DOCTOR_PHRASES)
 
 
-def _safety_post_check(text: str) -> bool:
-    """统一后置安全校验入口：医生化剧本 + 诊断泄露（诊断泄露需另传 case）。
+def _safety_post_check(text: str, case: Case | None = None) -> bool:
+    """统一后置安全校验入口：医生化剧本 + 诊断泄露。
 
     Args:
         text: SP 回复文本。
+        case: 病例对象；提供时额外检查是否直接说出真实诊断。
 
     Returns:
         True 表示"通过校验"，False 表示"未通过，需重新生成"。
     """
-    return not _looks_like_doctor(text)
+    if _looks_like_doctor(text):
+        return False
+    if case is not None and detect_diagnosis_leak(
+        case, [{"role": "assistant", "content": text}]
+    ):
+        return False
+    return True
 
 
-def _regenerate_without_doctor_leak(
+def _regenerate_safe_reply(
     client: Any,
     case: Case,
     history: list[dict[str, str]] | None,
@@ -345,7 +360,7 @@ def _regenerate_without_doctor_leak(
     max_tokens: int,
     max_retries: int = 2,
 ) -> str:
-    """生成一条 SP 回复，若命中医生化剧本则附加强负面提示重试 ``max_retries`` 次。
+    """生成一条 SP 回复，若命中医生化剧本或诊断泄露则附加强负面提示重试。
 
     多次仍越界时返回最后一次结果（记录 warning 日志，不阻塞对话）。
     """
@@ -358,18 +373,18 @@ def _regenerate_without_doctor_leak(
             )
         except Exception:
             raise  # API 错误往外抛
-        if _safety_post_check(text):
+        if _safety_post_check(text, case):
             return text
-        # 命中医生化剧本：往历史里追加一条"自我纠正"提示，引导重生成
+        # 命中医生化剧本或诊断泄露：追加"自我纠正"提示，引导重生成
         base_history = list(base_history) + [
             {"role": "assistant", "content": text},
             {"role": "user", "content": "（系统提示：请用普通患者口吻重答，不要给任何诊断或建议。）"},
         ]
         logger.warning(
-            "SP 回复触发医生化剧本（第 %d 次），自动重试",
+            "SP 回复触发医生化剧本或诊断泄露（第 %d 次），自动重试",
             attempt,
         )
-    logger.warning("SP 重试 %d 次仍含医生化剧本，使用最后一次结果", max_retries)
+    logger.warning("SP 重试 %d 次仍含医生化剧本或诊断泄露，使用最后一次结果", max_retries)
     return text
 
 
@@ -382,7 +397,7 @@ def generate_safe_patient_reply(
     temperature: float = TEMPERATURE,
     max_tokens: int = 512,
 ) -> str:
-    """调用大模型生成 SP 回复（带医生化剧本后置校验与自动重试）。
+    """调用大模型生成 SP 回复（带医生化剧本/诊断泄露后置校验与自动重试）。
 
     教学场景下，"SP 主动给诊断/建议"会破坏训练真实性。本函数是对
     :func:`generate_patient_reply` 的加固版：生成后做后置校验，命中则
@@ -390,7 +405,7 @@ def generate_safe_patient_reply(
 
     流式场景使用 :func:`stream_patient_reply`，重试策略由调用方决定。
     """
-    return _regenerate_without_doctor_leak(
+    return _regenerate_safe_reply(
         client, case, history,
         model=model, temperature=temperature, max_tokens=max_tokens,
         max_retries=2,

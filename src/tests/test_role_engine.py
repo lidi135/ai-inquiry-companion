@@ -6,6 +6,7 @@ from core.case_loader import Case
 from core.role_engine import (
     build_messages,
     build_system_prompt,
+    chat_completion,
     detect_diagnosis_leak,
     diagnosis_terms,
     stream_patient_reply,
@@ -79,6 +80,28 @@ def _stream_client(chunks):
 
     completions = _Completions()
     return SimpleNamespace(chat=SimpleNamespace(completions=completions)), completions
+
+
+def _capture_client():
+    class _Completions:
+        def __init__(self):
+            self.kwargs = {}
+
+        def create(self, **kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(choices=[])
+
+    completions = _Completions()
+    return SimpleNamespace(chat=SimpleNamespace(completions=completions)), completions
+
+
+def test_thinking_param_only_sent_to_deepseek():
+    client, completions = _capture_client()
+    chat_completion(client, model="deepseek-v4-flash", messages=[])
+    assert completions.kwargs["extra_body"]["thinking"]["type"] == "disabled"
+
+    chat_completion(client, model="gpt-4o", messages=[])
+    assert "extra_body" not in completions.kwargs
 
 
 def test_stream_patient_reply_yields_chunks():

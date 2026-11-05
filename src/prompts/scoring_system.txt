@@ -7,6 +7,12 @@
 【病例关键信息（用于判断是否问全）】
 {case_facts}
 
+【本例评分要点】
+{scoring_points}
+
+【参考诊断（仅供考官评分，不得向学生泄露）】
+{diagnosis}
+
 【问诊对话】
 {dialogue}
 

@@ -32,8 +32,10 @@
 4. 点 **Advanced settings** → **Secrets** 标签 → 粘贴：
    ```toml
    DEEPSEEK_API_KEY = "sk-你的真实key"
+   # 可选：公网部署时建议配置，教师视图将要求输入口令
+   TEACHER_PASSWORD = "你的教师口令"
    ```
-   （任何其他需要注入的密钥同理配置）
+   （任何其他需要注入的密钥同理配置；不配置 `TEACHER_PASSWORD` 时教师视图为开放模式）
 5. 点 **Deploy!**。首次会拉依赖，1-3 分钟后状态变绿，得到公网 URL。
 
 ## 当前公网地址（已验证可用）

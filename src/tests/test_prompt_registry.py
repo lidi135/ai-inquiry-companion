@@ -51,6 +51,9 @@ def test_get_explicit_version(monkeypatch, tmp_path):
 def test_list_versions_includes_default():
     versions = prompt_registry.list_versions()
     assert "default" in versions
+    # role_system / generation_schema 的公共后缀不应被误当成版本号
+    assert "system" not in versions
+    assert "schema" not in versions
 
 
 def test_get_schema_returns_json():

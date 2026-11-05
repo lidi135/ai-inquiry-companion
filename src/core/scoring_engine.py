@@ -19,7 +19,7 @@ from typing import Any
 from .case_loader import Case
 from .prompt_registry import get as get_prompt
 from .role_engine import chat_completion
-from .synonyms import expand_term, load_synonyms
+from .synonyms import load_synonyms
 
 # ---------------------------------------------------------------------------
 # 评分量表（Rubric）：维度名 -> 满分值
@@ -218,29 +218,49 @@ def _bigrams(text: str) -> set[str]:
     return {t[i : i + 2] for i in range(len(t) - 1)}
 
 
+def _expand_point_variants(point: str, synonyms: dict[str, list[str]]) -> list[str]:
+    """把病例事实点扩展为「原句 + 命中的同义词族」。
+
+    词典键是短术语（如「糖尿病」），而病例信息点通常是整句
+    （如「糖尿病史5年」）。只要句子中出现某个标准词或同义词，
+    就把该词族的全部说法加入候选，解决「整句精确匹配不到词典」的问题。
+    """
+    variants: list[str] = [point]
+    for canonical, extras in synonyms.items():
+        # 跳过单字同义词（如「肿」「晕」），避免子串匹配产生大量误命中
+        forms = [f for f in [canonical, *extras] if f and len(f) >= 2]
+        if any(form in point for form in forms):
+            variants.extend(forms)
+    return list(dict.fromkeys(v for v in variants if v))
+
+
 def _coverage_with_detail(
-    points: list[str], inquiry_text: str, threshold: float = 0.5
+    points: list[str],
+    inquiry_text: str,
+    threshold: float = 0.5,
+    synonyms: dict[str, list[str]] | None = None,
 ) -> tuple[float, list[str], list[str]]:
     """带命中术语明细的查询函数。
 
     对每个信息点，取其在学生问诊文本中命中的 2-gram 比例作为该点覆盖度；
     覆盖度 ≥ ``threshold`` 的点视为「已覆盖」，否则视为「建议补问」。
-    同时为了应对口语化表达，先用同义词词典做扩展（对每个 point 在
-    ``synonyms`` 字典中查同义形态，命中任一即算命中）。
+    同时为了应对口语化表达，先按词典把信息点扩展成同义词族，再看任一
+    变体是否被学生问到。
 
     Args:
         points:       病例事实点（来自现病史/既往史/...）。
         inquiry_text: 学生问诊文本。
         threshold:    覆盖度阈值；默认 0.5。
+        synonyms:     同义词词典；缺省时现场加载，批量评分可传入复用。
 
     Returns:
         (整体覆盖度, covered 列表, missed 列表)
     """
     if not points:
-        return 1.0, [], []
+        return 0.0, [], []
     inquiry_norm = _normalize_text(inquiry_text)
     inquiry_bg = _bigrams(inquiry_text)
-    synonyms = load_synonyms()
+    synonyms = synonyms if synonyms is not None else load_synonyms()
 
     total = 0.0
     valid = 0
@@ -253,8 +273,8 @@ def _coverage_with_detail(
             continue
         valid += 1
 
-        # 同义词扩展：把 point 在词典里的同义形态都算一遍
-        variants = expand_term(point_clean, synonyms)
+        # 同义词扩展：把 point 命中的词典词族都算一遍
+        variants = _expand_point_variants(point_clean, synonyms)
         # 用任一变体在 inquiry 中找 bigram 重叠，取最大者作为覆盖度
         best_cov = 0.0
         for variant in variants:
@@ -297,10 +317,10 @@ def _coverage(points: list[str], inquiry_text: str) -> float:
 def rule_score(case: Case, inquiry_text: str) -> ScoringResult:
     """规则评分：基于病史信息点覆盖度的启发式打分。
 
-    对每个客观病史维度（现病史/既往史/个人史/婚育史/家族史），
-    用信息点覆盖度乘以该维度满分得到得分；其余维度按客观维度覆盖度同比例
-    折算（避免"空问诊也白拿满分"）。同时每个维度返回「已覆盖 / 建议补问」
-    的术语列表，便于学生看到扣分原因与改进方向。
+    对每个有病例数据支持的客观病史维度（主诉/现病史/既往史/个人史/婚育史/
+    家族史），用信息点覆盖度乘以该维度满分得到得分；其余过程维度按客观维度
+    覆盖度折算。病例中缺失的病史字段不纳入评分，且会按数据完整度折扣过程
+    维度与综合表现分，避免「空问诊」或「病例数据缺失」被白送分。
 
     Args:
         case:         病例对象。
@@ -319,28 +339,47 @@ def rule_score(case: Case, inquiry_text: str) -> ScoringResult:
         "婚育史": case.history.get("婚育史", ""),
         "家族史": case.history.get("家族史", ""),
     }
-    objective_full = 0.0
+    objective_total = sum(
+        full for dim, full in RUBRIC_COMPLETENESS.items() if dim in objective_sources
+    )
+    synonyms = load_synonyms()
+
+    objective_available = 0.0
     objective_scored = 0.0
+    missing_sources: list[str] = []
     for dim, full_score in RUBRIC_COMPLETENESS.items():
-        if dim in objective_sources:
-            points = _extract_info_points(objective_sources[dim])
-            cov, covered, missed = _coverage_with_detail(points, inquiry_text)
-            score = round(full_score * cov, 1)
-            dimensions[dim] = DimensionDetail(
-                score=score, max=full_score,
-                covered=covered, missed=missed,
-            )
-            objective_full += full_score
-            objective_scored += score
+        if dim not in objective_sources:
+            continue
+        points = _extract_info_points(objective_sources[dim])
+        if not points:
+            # 病例未提供该维度的事实：不纳入评分，避免「空问诊也白拿满分」
+            missing_sources.append(dim)
+            continue
+        objective_available += full_score
+        cov, covered, missed = _coverage_with_detail(
+            points, inquiry_text, synonyms=synonyms
+        )
+        score = round(full_score * cov, 1)
+        dimensions[dim] = DimensionDetail(
+            score=score, max=full_score,
+            covered=covered, missed=missed,
+        )
+        objective_scored += score
 
     # 过程/结构维度（开放式提问、系统回顾、体格检查、辅助检查、病情演变、
-    # 一般情况等）无法靠规则可靠判定，按客观维度覆盖度同比例折算，
-    # 避免"空问诊也白拿满分"的评分失真；这些维度的细化交由 LLM 评分完成。
-    overall_coverage = (objective_scored / objective_full) if objective_full > 0 else 0.0
+    # 一般情况等）无法靠规则可靠判定，按客观维度覆盖度折算；再用病例数据
+    # 完整度打折，避免「只有主诉」的病例被覆盖后直接拿满分。
+    overall_coverage = (
+        objective_scored / objective_available if objective_available else 0.0
+    )
+    data_ratio = (
+        objective_available / objective_total if objective_total else 0.0
+    )
+    process_coverage = overall_coverage * data_ratio
     for dim, full_score in RUBRIC_COMPLETENESS.items():
         if dim not in objective_sources:
             dimensions[dim] = DimensionDetail(
-                score=round(full_score * overall_coverage, 1),
+                score=round(full_score * process_coverage, 1),
                 max=full_score, covered=[], missed=[],
             )
 
@@ -349,11 +388,10 @@ def rule_score(case: Case, inquiry_text: str) -> ScoringResult:
         for d in dimensions.values()
     )
 
-    # 综合表现：规则评分按完整度折算给一个基础分
-    completeness_ratio = completeness / sum(RUBRIC_COMPLETENESS.values())
+    # 综合表现：规则评分按完整度折算给一个基础分（同样受数据完整度约束）
     for dim, full_score in RUBRIC_PERFORMANCE.items():
         dimensions[dim] = DimensionDetail(
-            score=round(full_score * completeness_ratio, 1),
+            score=round(full_score * process_coverage, 1),
             max=full_score, covered=[], missed=[],
         )
 
@@ -365,11 +403,17 @@ def rule_score(case: Case, inquiry_text: str) -> ScoringResult:
         suggestions = "未采集到有效问诊内容，请先对患者进行系统问诊。"
     else:
         suggestions = "请结合问诊记录，逐维度核对是否遗漏关键病史信息。"
+
+    weaknesses = ["规则评分为启发式基线，建议采用 LLM 评分获得更细致的反馈"]
+    if missing_sources:
+        weaknesses.append(
+            "病例未提供以下病史字段，规则评分未计入：" + "、".join(missing_sources)
+        )
     return ScoringResult(
         total=round(total, 1),
         dimensions=dimensions,
         strengths=["已完成问诊信息点覆盖度评估（规则基线）"],
-        weaknesses=["规则评分为启发式基线，建议采用 LLM 评分获得更细致的反馈"],
+        weaknesses=weaknesses,
         suggestions=suggestions,
         method="rule",
     )
@@ -384,6 +428,12 @@ SCORING_PROMPT_TEMPLATE = """你是医学教育问诊技能考官。请依据下
 
 【病例关键信息（用于判断是否问全）】
 {case_facts}
+
+【本例评分要点】
+{scoring_points}
+
+【参考诊断（仅供考官评分，不得向学生泄露）】
+{diagnosis}
 
 【问诊对话】
 {dialogue}
@@ -421,6 +471,8 @@ def build_scoring_prompt(case: Case, history: list[dict[str, str]] | None = None
         completeness=json.dumps(RUBRIC_COMPLETENESS, ensure_ascii=False),
         performance=json.dumps(RUBRIC_PERFORMANCE, ensure_ascii=False),
         case_facts=case_to_facts(case),
+        scoring_points="、".join(case.scoring_points) or "（未提供）",
+        diagnosis=case.diagnosis or "（未提供）",
         dialogue=dialogue or "（无对话）",
     )
 

@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 from core.case_loader import Case
+from core.role_engine import build_system_prompt
 from core.scoring_engine import (
     RUBRIC_COMPLETENESS,
     RUBRIC_PERFORMANCE,
@@ -221,6 +222,36 @@ def test_rule_score_synonym_recognized():
     result = rule_score(case, "病人血糖高")
     score = _dim_score(result.dimensions, "现病史")
     assert score > 0
+
+
+def test_rule_score_empty_history_fields_do_not_give_free_points():
+    # 病例只有主诉、其他病史字段为空：空问诊必须为 0 分，
+    # 只问主诉也不应因为「缺失字段按比例折算」而拿高分。
+    case = _case(history={})
+    empty = rule_score(case, "")
+    assert empty.total == 0.0
+    covered = rule_score(case, "腹痛 3 天")
+    assert 0.0 < covered.total < 20.0
+
+
+def test_rule_score_synonym_expansion_covers_sentence_point():
+    # 病例事实点是整句，学生只说了口语同义词「血糖高」
+    case = _case(history={"现病史": "糖尿病史5年"})
+    result = rule_score(case, "血糖高")
+    detail = result.dimensions["现病史"]
+    assert isinstance(detail, DimensionDetail)
+    assert detail.score > 0
+    assert "糖尿病史5年" in detail.covered
+
+
+def test_build_scoring_prompt_includes_diagnosis_and_scoring_points():
+    # 用病史中不存在的诊断词，才能验证评分 Prompt 与角色 Prompt 的差异
+    case = _case(diagnosis="胃溃疡", scoring_points=["疼痛部位", "诱因"])
+    prompt = build_scoring_prompt(case, [])
+    assert "胃溃疡" in prompt
+    assert "疼痛部位" in prompt
+    # 角色 Prompt 仍然不能泄露诊断
+    assert "胃溃疡" not in build_system_prompt(case)
 
 
 def test_parse_llm_score_clamps_dimension_scores():

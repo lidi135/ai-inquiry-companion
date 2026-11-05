@@ -46,6 +46,14 @@ def test_macro_vs_micro_weighted():
     assert m.confusion == [[9, 0], [1, 0]]
 
 
+def test_unknown_prediction_label_is_included():
+    # 模型输出不在 labels 中的标签时不应崩溃，而是作为额外类别纳入指标
+    m = compute_metrics(["A", "B"], ["A", "X"], labels=["A", "B"])
+    assert m.accuracy == 0.5
+    assert "X" in m.per_class
+    assert len(m.confusion) == 3
+
+
 def test_confusion_matrix_shape():
     m = compute_metrics(["A", "B"], ["A", "B"], labels=["A", "B"])
     assert m.confusion == [[1, 0], [0, 1]]

@@ -7,7 +7,7 @@
     3. 主界面与 AI 虚拟标准化病人（VSP）进行自然语言问诊对话；
     4. 结束问诊后调用评分引擎生成结构化评分报告，并持久化到成长档案；
     5. 规则评分（离线）为默认基线，LLM 评分需配置 API Key。
-    6. 主导航：4 个 Tab（问诊训练 / SOAP 笔记 / MCQ 练习 / 教师视图）。
+    6. 主导导航：3 个 Tab（问诊训练 / SOAP 笔记 / 教师视图）。
     7. 实时评分反馈：每 3-5 轮给学生提示「已覆盖 / 建议补问」维度。
 
 运行方式：
@@ -16,8 +16,11 @@
 from __future__ import annotations
 
 import html
+import os
 import time
+import uuid
 from collections.abc import Mapping
+from typing import Any
 
 import streamlit as st
 
@@ -28,6 +31,7 @@ from core.records import (
     clear_session,
     load_history,
     load_session,
+    migrate_legacy_session,
     save_record,
     save_session,
 )
@@ -35,6 +39,7 @@ from core.role_engine import (
     create_client,
     detect_diagnosis_leak,
     generate_patient_reply,
+    generate_safe_patient_reply,
     stream_patient_reply,
 )
 from core.scoring_engine import (
@@ -425,6 +430,54 @@ def _mode_label(mode: str) -> str:
     return {"技能训练": "技能训练", "考试模拟": "考试模拟"}.get(mode, mode)
 
 
+def _get_session_id() -> str:
+    """获取当前浏览器会话标识，不存在时生成并写入 URL query param。
+
+    把会话 ID 放进 URL 的 ``sid`` 参数后，刷新页面仍能恢复同一会话；
+    不同访客各自生成独立 ID，避免共用同一个会话文件造成串号。
+    """
+    try:
+        sid = str(st.query_params.get("sid", "") or "").strip()
+        if not sid:
+            sid = uuid.uuid4().hex[:16]
+            st.query_params["sid"] = sid
+        return sid
+    except Exception:
+        # 测试桩或非标准运行环境：退化为进程内会话标识
+        fallback = st.session_state.get("_fallback_sid")
+        if not fallback:
+            fallback = uuid.uuid4().hex[:16]
+            st.session_state._fallback_sid = fallback
+        return str(fallback)
+
+
+def _teacher_gate() -> bool:
+    """教师视图口令校验。
+
+    配置 ``TEACHER_PASSWORD``（环境变量或 secrets.toml）后启用口令；
+    未配置时保持本地演示的开放模式，并在界面中给出提示。
+    """
+    expected = ""
+    try:
+        expected = str(st.secrets.get("TEACHER_PASSWORD", "") or "").strip()
+    except Exception:
+        expected = ""
+    expected = expected or os.getenv("TEACHER_PASSWORD", "").strip()
+    if not expected:
+        st.caption("未配置 TEACHER_PASSWORD，教师视图当前为开放模式（公网部署建议配置）。")
+        return True
+    if st.session_state.get("teacher_authorized"):
+        return True
+
+    entered = st.text_input("教师口令", type="password", key="_teacher_pwd")
+    if entered:
+        if entered == expected:
+            st.session_state.teacher_authorized = True
+            st.rerun()
+        st.error("教师口令不正确。")
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 初始化会话状态
 # ---------------------------------------------------------------------------
@@ -440,6 +493,17 @@ if "exam_start" not in st.session_state:
 # 已弹过的实时评分提示（避免同一维度重复刷提示）
 if "real_time_tips_shown" not in st.session_state:
     st.session_state.real_time_tips_shown = set()
+
+# 当前病例/模式快照：用于检测切换并重置会话，避免把上一病例的对话带到下一病例
+if "current_case_id" not in st.session_state:
+    st.session_state.current_case_id = None
+if "current_mode" not in st.session_state:
+    st.session_state.current_mode = None
+
+# 浏览器会话标识（写入 URL query param，刷新后保持；用于隔离会话文件与个人记录）
+if "session_id" not in st.session_state:
+    st.session_state.session_id = _get_session_id()
+session_id: str = st.session_state.session_id
 
 
 # ---------------------------------------------------------------------------
@@ -481,10 +545,27 @@ options = _build_case_options(filtered)
 display_name = st.sidebar.selectbox("具体病例", list(options), key="_case_select")
 case = filtered[options[display_name]]
 
+# 切换病例或训练模式时，清空上一轮对话/报告/计时，避免把旧病例内容带进新病例
+case_changed = st.session_state.current_case_id not in (None, case.case_id)
+mode_changed = st.session_state.current_mode not in (None, mode)
+if case_changed or mode_changed:
+    st.session_state.messages = []
+    st.session_state.report = None
+    st.session_state.exam_start = None
+    st.session_state.real_time_tips_shown = set()
+    clear_session(session_id)
+st.session_state.current_case_id = case.case_id
+st.session_state.current_mode = mode
+
 # 恢复上次会话（仅当本轮尚无对话、且会话属于当前病例时，支持刷新/重进续答）
 if not st.session_state.messages:
-    saved = load_session()
-    if saved and saved.get("case_id") == case.case_id:
+    saved = load_session(session_id)
+    if not isinstance(saved, dict) or not saved.get("messages"):
+        # 首次启动时把旧版单例会话迁移到当前浏览器会话（只执行一次）
+        migrated = migrate_legacy_session(session_id, expected_case_id=case.case_id)
+        if migrated:
+            saved = migrated
+    if isinstance(saved, dict) and saved.get("case_id") == case.case_id:
         st.session_state.messages = list(saved.get("messages") or [])
         if saved.get("report"):
             st.session_state.report = ScoringResult.from_dict(saved["report"])
@@ -501,10 +582,29 @@ st.sidebar.caption(f"主诉：{case.chief_complaint}")
 if case.department:
     st.sidebar.caption(f"科室：{case.department}　难度：{case.difficulty or '-'}")
 
+# --- 学生信息（用于成长档案与教师视图按学生/班级隔离） ---
+st.sidebar.markdown("### 🧑‍🎓 学生信息")
+student_id = st.sidebar.text_input(
+    "学号 / 姓名（可选）",
+    key="_student_id",
+    placeholder="留空则仅按当前浏览器会话隔离",
+).strip()
+class_id = st.sidebar.text_input(
+    "班级编号（教师视图用）",
+    value="default",
+    key="_class_id",
+).strip()
+
 # --- 模型与评分方式 ---
 st.sidebar.markdown("### 🤖 模型与评分")
 model_key = st.sidebar.selectbox("选择模型", list(MODEL_REGISTRY), index=0, key="_model_key")
 use_llm_score = st.sidebar.checkbox("使用 LLM 智能评分（需配置 API Key）", value=False, key="_use_llm_score")
+strict_safety = st.sidebar.checkbox(
+    "严格角色安全模式（关闭流式输出）",
+    value=mode == "考试模拟",
+    key=f"_strict_safety_{mode}",
+    help="开启后先完整生成并校验患者回复，发现诊断泄露或医生化话术会自动重试；关闭则使用流式输出。",
+)
 
 # 清空对话按钮
 if st.sidebar.button("🔄 重新开始", use_container_width=True):
@@ -512,7 +612,7 @@ if st.sidebar.button("🔄 重新开始", use_container_width=True):
     st.session_state.report = None
     st.session_state.exam_start = None
     st.session_state.real_time_tips_shown = set()
-    clear_session()
+    clear_session(session_id)
     st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -527,14 +627,20 @@ with st.sidebar.expander("AI 生成新病例（DeepSeek）", expanded=False):
     gen_diff = st.selectbox(
         "难度", difficulties, index=1, key="_gen_diff",
     )
+    gen_force_new = st.checkbox(
+        "强制重新生成（忽略缓存）",
+        key="_gen_force_new",
+        help="同一科室/难度已有缓存时，勾选后会重新调用模型生成新病例。",
+    )
     if st.button("🚀 生成 1 例", key="_gen_btn"):
         try:
-            with st.spinner("DeepSeek 正在生成病例……"):
+            with st.spinner("正在生成病例……"):
                 new_case = generate_new_case(
                     department=gen_dept,
                     difficulty=gen_diff,
                     model_key=model_key,
                     use_cache=True,
+                    force_new=gen_force_new,
                     existing=cases,
                 )
             st.session_state._extra_cases[new_case.case_id] = new_case
@@ -559,6 +665,10 @@ def _generate_report(
     use_llm_score: bool,
     model_key: str,
     mode: str,
+    *,
+    student_id: str,
+    class_id: str,
+    session_id: str,
 ) -> ScoringResult:
     """生成评分报告并持久化到成长档案。"""
     inquiry_text = "\n".join(
@@ -582,7 +692,14 @@ def _generate_report(
         report.weaknesses.append("系统检测到虚拟病人在对话中可能存在越界回答，已记录。")
 
     try:
-        save_record(report, case, mode=_mode_label(mode))
+        save_record(
+            report,
+            case,
+            mode=_mode_label(mode),
+            student_id=student_id or "self",
+            class_id=class_id or "default",
+            session_id=session_id,
+        )
     except Exception:
         # 记录持久化失败不应阻断评分展示
         pass
@@ -591,12 +708,33 @@ def _generate_report(
 
 def _persist() -> None:
     """把当前会话（对话、报告、考试计时）落盘，支持刷新/重进续答。"""
-    save_session({
-        "case_id": case.case_id,
-        "messages": st.session_state.messages,
-        "report": st.session_state.report.to_dict() if st.session_state.report else None,
-        "exam_start": st.session_state.exam_start,
-    })
+    save_session(
+        {
+            "case_id": case.case_id,
+            "messages": st.session_state.messages,
+            "report": st.session_state.report.to_dict() if st.session_state.report else None,
+            "exam_start": st.session_state.exam_start,
+        },
+        session_id,
+    )
+
+
+def _personal_history(student_id: str, session_id: str) -> list[dict[str, Any]]:
+    """返回个人成长档案可见的记录。
+
+    优先按学号过滤（跨设备/跨会话）；未填学号时按浏览器会话隔离。
+    同时兼容升级前的本地记录（没有 session_id 字段）。
+    """
+    sid = student_id.strip()
+    if sid:
+        return load_history(student_id=sid)
+    records = load_history(session_id=session_id)
+    if records:
+        return records
+    return [
+        r for r in load_history()
+        if not r.get("session_id") and r.get("student_id", "self") == "self"
+    ]
 
 
 def _conversation_markdown(case: Case, messages: list[dict[str, str]]) -> str:
@@ -642,7 +780,7 @@ def _real_time_tip_html(report: ScoringResult) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 主导航：4 个 Tab
+# 主导航：3 个 Tab
 # ---------------------------------------------------------------------------
 tab_train, tab_test, tab_teacher = st.tabs([
     "🩺 问诊训练",
@@ -791,7 +929,8 @@ with tab_train:
         with st.chat_message("user"):
             st.markdown(question)
 
-        # 2) 调用角色引擎流式生成患者回复
+        # 2) 调用角色引擎生成患者回复：严格模式下先完整生成并校验，
+        #    普通模式使用流式输出（打字机效果）
         try:
             client = create_client(model_key)
         except Exception as e:  # API 未配置，回滚本轮提问并给出提示
@@ -800,17 +939,33 @@ with tab_train:
             st.stop()
 
         try:
-            with st.chat_message("assistant"):
-                reply = st.write_stream(
-                    stream_patient_reply(
-                        client,
-                        case,
-                        history=st.session_state.messages,
-                        model=MODEL_REGISTRY[model_key].model,
-                        temperature=TEMPERATURE,
-                    )
+            if strict_safety:
+                reply = generate_safe_patient_reply(
+                    client,
+                    case,
+                    history=st.session_state.messages,
+                    model=MODEL_REGISTRY[model_key].model,
+                    temperature=TEMPERATURE,
                 )
-        except Exception:  # 流式失败时降级为一次性生成
+                with st.chat_message("assistant"):
+                    st.markdown(reply)
+            else:
+                with st.chat_message("assistant"):
+                    raw_reply = st.write_stream(
+                        stream_patient_reply(
+                            client,
+                            case,
+                            history=st.session_state.messages,
+                            model=MODEL_REGISTRY[model_key].model,
+                            temperature=TEMPERATURE,
+                        )
+                    )
+                    reply = (
+                        raw_reply
+                        if isinstance(raw_reply, str)
+                        else "".join(str(x) for x in raw_reply)
+                    )
+        except Exception:  # 生成失败时降级为一次性生成
             with st.chat_message("assistant"):
                 reply = generate_patient_reply(
                     client,
@@ -825,7 +980,8 @@ with tab_train:
         # 3) 考试模式：问满即自动交卷
         if is_exam and sum(1 for m in st.session_state.messages if m["role"] == "user") >= EXAM_MAX_QUESTIONS:
             st.session_state.report = _generate_report(
-                case, st.session_state.messages, use_llm_score, model_key, mode
+                case, st.session_state.messages, use_llm_score, model_key, mode,
+                student_id=student_id, class_id=class_id, session_id=session_id,
             )
             st.rerun()
 
@@ -847,13 +1003,15 @@ with tab_train:
         if not is_exam:
             if st.button("生成评分报告", disabled=len(st.session_state.messages) == 0):
                 st.session_state.report = _generate_report(
-                    case, st.session_state.messages, use_llm_score, model_key, mode
+                    case, st.session_state.messages, use_llm_score, model_key, mode,
+                    student_id=student_id, class_id=class_id, session_id=session_id,
                 )
                 st.rerun()
         else:
             if st.button("交卷并生成评分", disabled=(exam_finished or len(st.session_state.messages) == 0)):
                 st.session_state.report = _generate_report(
-                    case, st.session_state.messages, use_llm_score, model_key, mode
+                    case, st.session_state.messages, use_llm_score, model_key, mode,
+                    student_id=student_id, class_id=class_id, session_id=session_id,
                 )
                 st.rerun()
 
@@ -968,8 +1126,9 @@ with tab_train:
 with tab_test:
     st.markdown('<div class="sec-title">📝 SOAP 笔记训练</div>', unsafe_allow_html=True)
     st.caption(
-        f"针对【{case.display_name} · {case.diagnosis or '无诊断'}】撰写 4 个 SOAP 笔记，"
+        f"针对【{case.display_name}】撰写 4 个 SOAP 笔记，"
         "系统按主观(S)/客观(O)/评估(A)/计划(P) 4 维各 25 分进行启发式评分。"
+        "为避免视角偏差，参考诊断会在提交评分后展示。"
     )
 
     s = st.text_area("S - 主观资料（主诉+现病史+既往史等）", key="_soap_s", height=120,
@@ -990,6 +1149,8 @@ with tab_test:
         ), unsafe_allow_html=True)
         # 4 维进度条
         st.markdown(_dim_bars_html(result.dimensions), unsafe_allow_html=True)
+        if case.diagnosis:
+            st.caption(f"参考诊断：{case.diagnosis}")
         st.download_button(
             "下载 SOAP 评分报告（Markdown）",
             data=result.to_markdown(),
@@ -1003,46 +1164,48 @@ with tab_test:
 # ---------------------------------------------------------------------------
 with tab_teacher:
     st.markdown('<div class="sec-title">👨‍🏫 教师视图</div>', unsafe_allow_html=True)
-    st.caption("基于全部本地训练记录聚合统计；接入班级后可按 class_id 切分。")
+    st.caption("基于本地训练记录按班级聚合统计；在侧边栏填写班级编号即可切换。")
 
-    overview = load_class_overview("default")
-    if overview["n_records"] == 0:
-        st.info("尚无训练记录。请学生先完成问诊评分，再来查看班级统计。")
-    else:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("记录数", overview["n_records"])
-        c2.metric("学生数", len(overview["students"]))
-        c3.metric("平均总分", f"{overview['avg_total']:.1f}")
-        c4.metric("维度覆盖", len(overview["dim_avg"]))
+    if _teacher_gate():
+        overview = load_class_overview(class_id or "default")
+        if overview["n_records"] == 0:
+            st.info("尚无训练记录。请学生先完成问诊评分，再来查看班级统计。")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("记录数", overview["n_records"])
+            c2.metric("学生数", len(overview["students"]))
+            c3.metric("平均总分", f"{overview['avg_total']:.1f}")
+            c4.metric("维度覆盖", len(overview["dim_avg"]))
 
-        # 趋势图
-        if overview["total_trend"]:
-            st.markdown('<div class="sec-sub">最近 10 次总分趋势</div>', unsafe_allow_html=True)
-            st.line_chart({"总分": [t["总分"] for t in overview["total_trend"]]})
+            # 趋势图
+            if overview["total_trend"]:
+                st.markdown('<div class="sec-sub">最近 10 次总分趋势</div>', unsafe_allow_html=True)
+                st.line_chart({"总分": [t["总分"] for t in overview["total_trend"]]})
 
-        # 维度失分热力
-        ranking = dim_loss_ranking("default", top_n=6)
-        if ranking:
-            st.markdown('<div class="sec-sub">班级弱项 TOP 5（按失分降序）</div>', unsafe_allow_html=True)
-            rows = [
-                {"维度": d, "平均失分": avg}
-                for d, avg in ranking
+            # 维度失分热力
+            ranking = dim_loss_ranking(class_id or "default", top_n=5)
+            if ranking:
+                st.markdown('<div class="sec-sub">班级弱项 TOP 5（按失分降序）</div>', unsafe_allow_html=True)
+                rows = [
+                    {"维度": d, "平均失分": avg}
+                    for d, avg in ranking
+                ]
+                st.dataframe(rows, hide_index=True, use_container_width=True)
+
+            # 历史记录
+            st.markdown('<div class="sec-sub">训练历史</div>', unsafe_allow_html=True)
+            history_rows = [
+                {
+                    "时间": r.get("时间", ""),
+                    "学生": r.get("student_id", ""),
+                    "班级": r.get("class_id", ""),
+                    "病例": r.get("病例", ""),
+                    "总分": r.get("总分"),
+                    "模式": r.get("模式", ""),
+                }
+                for r in overview["records"]
             ]
-            st.dataframe(rows, hide_index=True, use_container_width=True)
-
-        # 历史记录
-        st.markdown('<div class="sec-sub">训练历史</div>', unsafe_allow_html=True)
-        history_rows = [
-            {
-                "时间": r.get("时间", ""),
-                "学生": r.get("student_id", ""),
-                "病例": r.get("病例", ""),
-                "总分": r.get("总分"),
-                "模式": r.get("模式", ""),
-            }
-            for r in overview["records"]
-        ]
-        st.dataframe(history_rows, hide_index=True, use_container_width=True)
+            st.dataframe(history_rows, hide_index=True, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1054,6 +1217,9 @@ def _plot_radar(dimensions: Mapping[str, object]):
     兼容两种「分维度得分」格式：
         * 纯数字：``{"询问主诉": 80.0}``（旧记录）；
         * 嵌套 dict：``{"询问主诉": {"得分": 80.0, ...}}``（DimensionDetail 序列化）。
+
+    各维度满分不同（主诉 5 分、现病史 15 分等），因此统一按
+    「得分 / 满分 × 100」折算成得分率后再画图，避免不同量纲失真。
     """
     import math
 
@@ -1072,17 +1238,26 @@ def _plot_radar(dimensions: Mapping[str, object]):
     plt.rcParams["axes.unicode_minus"] = False
 
     labels = list(dimensions.keys())
+    rubric_max = {**RUBRIC_COMPLETENESS, **RUBRIC_PERFORMANCE}
     values: list[float] = []
     for k in labels:
         v = dimensions[k]
         if isinstance(v, dict):
             raw = v.get("得分", v.get("score", 0.0))
+            max_v = v.get("满分", v.get("max", rubric_max.get(k, 100.0)))
         else:
             raw = v
+            max_v = rubric_max.get(k, 100.0)
         try:
-            values.append(float(raw))  # type: ignore[arg-type]
+            score = float(raw)  # type: ignore[arg-type]
         except (TypeError, ValueError):
-            values.append(0.0)
+            score = 0.0
+        try:
+            max_score = float(max_v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            max_score = 100.0
+        pct = (score / max_score * 100.0) if max_score else 0.0
+        values.append(max(0.0, min(100.0, pct)))
     n = len(labels)
     angles = [i / n * 2 * math.pi for i in range(n)]
     values += values[:1]
@@ -1093,17 +1268,20 @@ def _plot_radar(dimensions: Mapping[str, object]):
     ax.fill(angles, values, color="#2e5485", alpha=0.2)
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, fontsize=9)
-    ax.set_ylim(0, max(values) or 100)
-    ax.set_title("问诊能力雷达图", fontsize=12, weight="bold")
+    ax.set_ylim(0, 100)
+    ax.set_title("问诊能力雷达图（得分率）", fontsize=12, weight="bold")
     return fig
 
 
 with tab_train:
     st.markdown("---")
     with st.expander("个人成长档案", expanded=False):
-        history = load_history()
+        history = _personal_history(student_id, session_id)
         if not history:
-            st.caption("暂无训练记录。完成一次评分后，系统会自动写入成长档案。")
+            st.caption(
+                "暂无训练记录。完成一次评分后，系统会自动写入成长档案；"
+                "填写学号可跨浏览器查看自己的历史记录。"
+            )
         else:
             scores = [float(r.get("总分", 0)) for r in history]
             st.write("**训练概览**")

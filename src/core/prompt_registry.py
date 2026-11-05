@@ -35,8 +35,6 @@ def _resolve(name: str, version: str) -> tuple[Path | None, str]:
         return custom.with_suffix(".txt"), version
     if base.with_suffix(".txt").exists():
         return base.with_suffix(".txt"), "default"
-    if version != "default" and custom.with_suffix(".txt").exists():
-        return custom.with_suffix(".txt"), version
     return None, ""
 
 
@@ -111,14 +109,18 @@ def list_versions() -> list[str]:
     versions: set[str] = set()
     if not _PROMPTS_DIR.exists():
         return []
-    for p in _PROMPTS_DIR.glob("*.txt"):
+    # 已知提示词基名，避免把 role_system 的 "system" 或 generation_schema 的
+    # "schema" 误当成版本号。
+    base_names = ("role_system", "scoring_system", "generation_system", "generation_schema")
+    for p in _PROMPTS_DIR.iterdir():
+        if p.suffix not in (".txt", ".json"):
+            continue
         stem = p.stem
-        # 形如 ``role_system`` 或 ``role_system_v2``
-        parts = stem.split("_", 1)
-        if len(parts) == 2:
-            # 检查是否含非 default 版本字段（_ 之后含 . 或额外下划线视为自定义）
-            suffix = parts[1]
-            if suffix and suffix != "system":  # 'system' 是 generation_schema_xxx 等共用关键词
-                versions.add(suffix)
-        versions.add("default")
+        for name in base_names:
+            if stem == name:
+                versions.add("default")
+            elif stem.startswith(f"{name}_"):
+                suffix = stem[len(name) + 1:]
+                if suffix:
+                    versions.add(suffix)
     return sorted(versions)

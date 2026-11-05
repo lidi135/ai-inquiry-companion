@@ -1,6 +1,7 @@
 """角色一致性后置校验单测（A3）。"""
 from __future__ import annotations
 
+from core.case_loader import Case
 from core.role_engine import _looks_like_doctor, _safety_post_check
 
 
@@ -27,3 +28,14 @@ def test_empty_text_safe():
 def test_safety_post_check_inverts():
     assert _safety_post_check("我肚子疼") is True
     assert _safety_post_check("建议您做胃镜") is False
+
+
+def test_safety_post_check_blocks_diagnosis_leak():
+    case = Case(
+        case_id="P99",
+        chief_complaint="腹泻 2 天",
+        scoring_category="问诊评分",
+        diagnosis="急性胃肠炎",
+    )
+    assert _safety_post_check("我肚子疼", case) is True
+    assert _safety_post_check("你这个就是急性胃肠炎", case) is False
