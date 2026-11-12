@@ -20,6 +20,7 @@ import os
 import time
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -1211,6 +1212,25 @@ with tab_teacher:
 # ---------------------------------------------------------------------------
 # 个人成长档案（保留在 Tab 1 末尾，避免破坏老路径）
 # ---------------------------------------------------------------------------
+# 随仓库打包的中文字体：Docker / Streamlit Cloud 等容器环境通常没有中文字体，
+# 若只靠系统字体名匹配会静默回退到缺字的字体，导致雷达图中文全部变成方框。
+_CJK_FONT_FILE = Path(__file__).resolve().parent / "assets" / "fonts" / "NotoSansCJKsc-Regular.otf"
+
+
+def _cjk_font_props():
+    """返回能渲染中文的 FontProperties：优先使用随仓库打包的字体。"""
+    import matplotlib.font_manager as fm
+
+    if _CJK_FONT_FILE.exists():
+        fm.fontManager.addfont(str(_CJK_FONT_FILE))
+        return fm.FontProperties(fname=str(_CJK_FONT_FILE))
+    available = {f.name for f in fm.fontManager.ttflist}
+    for name in ("Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC"):
+        if name in available:
+            return fm.FontProperties(family=name)
+    return None
+
+
 def _plot_radar(dimensions: Mapping[str, object]):
     """基于分维度得分绘制能力雷达图（matplotlib 极坐标）。
 
@@ -1226,16 +1246,13 @@ def _plot_radar(dimensions: Mapping[str, object]):
     import matplotlib
 
     matplotlib.use("Agg")
-    import matplotlib.font_manager as fm
     import matplotlib.pyplot as plt
 
-    available = {f.name for f in fm.fontManager.ttflist}
-    font = next(
-        (f for f in ["Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC"] if f in available),
-        "SimHei",
-    )
-    plt.rcParams["font.sans-serif"] = [font]
+    font_prop = _cjk_font_props()
+    if font_prop is not None:
+        plt.rcParams["font.family"] = [font_prop.get_name()]
     plt.rcParams["axes.unicode_minus"] = False
+    font_kwargs: dict[str, Any] = {"fontproperties": font_prop} if font_prop is not None else {}
 
     labels = list(dimensions.keys())
     rubric_max = {**RUBRIC_COMPLETENESS, **RUBRIC_PERFORMANCE}
@@ -1267,9 +1284,9 @@ def _plot_radar(dimensions: Mapping[str, object]):
     ax.plot(angles, values, "o-", linewidth=1.6, color="#2e5485")
     ax.fill(angles, values, color="#2e5485", alpha=0.2)
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_xticklabels(labels, fontsize=9, **font_kwargs)
     ax.set_ylim(0, 100)
-    ax.set_title("问诊能力雷达图（得分率）", fontsize=12, weight="bold")
+    ax.set_title("问诊能力雷达图（得分率）", fontsize=12, **font_kwargs)
     return fig
 
 

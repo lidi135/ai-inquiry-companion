@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -193,3 +194,19 @@ def test_app_runs_end_to_end(streamlit_stub):
     assert app.st.session_state.messages == []
     # 主界面应正确读取真实病例库并完成加载（无异常即通过）
     assert app._load_cases() is not None
+
+
+def test_bundled_cjk_font_covers_radar_labels():
+    """雷达图中文依赖随仓库打包的字体：字体缺失或缺字都会渲染成方框。"""
+    pytest.importorskip("fontTools.ttLib")
+    from fontTools.ttLib import TTFont
+
+    from core.scoring_engine import RUBRIC_COMPLETENESS, RUBRIC_PERFORMANCE
+
+    font_file = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "NotoSansCJKsc-Regular.otf"
+    assert font_file.is_file(), f"缺少打包字体 {font_file}，容器/公网环境会把雷达图中文渲染成方框"
+
+    cmap = set(TTFont(str(font_file)).getBestCmap())
+    texts = [*RUBRIC_COMPLETENESS, *RUBRIC_PERFORMANCE, "问诊能力雷达图（得分率）", "0123456789.%"]
+    missing = sorted({ch for s in texts for ch in s if not ch.isspace() and ord(ch) not in cmap})
+    assert not missing, f"打包字体缺少字形: {missing}"
