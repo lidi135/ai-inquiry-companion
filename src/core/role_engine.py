@@ -87,14 +87,24 @@ def _read_api_key(env_var: str) -> str | None:
     key = os.getenv(env_var)
     if key and not str(key).startswith("your-"):
         return str(key).strip()
+    # Streamlit Cloud 的密钥通常只注入 st.secrets，不一定会落到仓库内的 secrets.toml
+    try:
+        import streamlit as st
+
+        if env_var in st.secrets:
+            val = str(st.secrets[env_var]).strip()
+            if val and not val.startswith("your-"):
+                return val
+    except Exception:
+        pass
     try:
         if SECRETS_FILE.exists():
             import tomllib  # Python 3.11+ 标准库
 
             data = tomllib.loads(SECRETS_FILE.read_text(encoding="utf-8"))
-            val = data.get(env_var)
-            if val and not str(val).startswith("your-"):
-                return str(val).strip()
+            file_val = data.get(env_var)
+            if file_val and not str(file_val).startswith("your-"):
+                return str(file_val).strip()
     except Exception:
         # secrets.toml 缺失/损坏或不支持 tomllib（<3.11）时静默降级为环境变量
         pass

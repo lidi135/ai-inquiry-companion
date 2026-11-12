@@ -28,7 +28,10 @@ def _extract_dim_score(rec: dict[str, Any], dim: str) -> float | None:
     dims = rec.get("分维度得分") or {}
     v = dims.get(dim)
     if isinstance(v, dict):
-        return float(v.get("得分", 0) or 0)
+        try:
+            return float(v.get("得分", 0) or 0)
+        except (TypeError, ValueError):
+            return None
     if v is None:
         return None
     try:

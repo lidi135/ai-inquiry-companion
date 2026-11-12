@@ -210,3 +210,18 @@ def test_bundled_cjk_font_covers_radar_labels():
     texts = [*RUBRIC_COMPLETENESS, *RUBRIC_PERFORMANCE, "问诊能力雷达图（得分率）", "0123456789.%"]
     missing = sorted({ch for s in texts for ch in s if not ch.isspace() and ord(ch) not in cmap})
     assert not missing, f"打包字体缺少字形: {missing}"
+
+
+def test_personal_history_falls_back_when_student_id_is_new(streamlit_stub, monkeypatch):
+    """学号是后来才填的：旧记录以 self 保存，不应因此让成长档案变成空。"""
+    import app
+
+    session_record = {"病例": "P01", "student_id": "self", "session_id": "s1", "总分": 80.0}
+
+    def fake_load_history(**kwargs):
+        if kwargs.get("student_id"):
+            return []
+        return [session_record]
+
+    monkeypatch.setattr(app, "load_history", fake_load_history)
+    assert app._personal_history("2024001", "s1") == [session_record]

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """训练记录持久化模块单元测试。"""
 import json
+import tempfile
+from pathlib import Path
 
 from core.case_loader import Case
 from core.records import (
@@ -191,3 +193,14 @@ def test_load_history_filters_by_identity(tmp_path, monkeypatch):
     assert len(load_history(session_id="sid-b")) == 1
     assert len(load_history(student_id="bob", class_id="C2")) == 1
     assert load_history(student_id="nobody") == []
+
+
+def test_records_dir_falls_back_when_primary_not_writable(tmp_path, monkeypatch):
+    """容器只读时，记录目录应自动回退到可写的临时目录，而不是静默失败。"""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr("core.records.RECORDS_DIR", blocker / "records")
+
+    from core.records import records_dir
+
+    assert records_dir() == Path(tempfile.gettempdir()) / "ai_inquiry_records"

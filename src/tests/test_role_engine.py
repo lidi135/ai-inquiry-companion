@@ -109,3 +109,20 @@ def test_stream_patient_reply_yields_chunks():
     chunks = list(stream_patient_reply(client, _case(), model="test"))
     assert "".join(chunks) == "你好，肚子疼。"
     assert completions.kwargs["stream"] is True
+
+
+def test_read_api_key_falls_back_to_streamlit_secrets(monkeypatch):
+    """Streamlit Cloud 只把密钥注入 st.secrets 时，也必须能读到。"""
+    import sys
+    import types
+    from pathlib import Path
+
+    import core.role_engine as role_engine
+
+    fake_st = types.ModuleType("streamlit")
+    fake_st.secrets = {"DEEPSEEK_API_KEY": "sk-from-cloud"}
+    monkeypatch.setitem(sys.modules, "streamlit", fake_st)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(role_engine, "SECRETS_FILE", Path("does-not-exist.toml"))
+
+    assert role_engine._read_api_key("DEEPSEEK_API_KEY") == "sk-from-cloud"

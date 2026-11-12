@@ -549,8 +549,15 @@ def parse_llm_score(text: str | None) -> ScoringResult:
 
     # 已知维度钳制到量表满分数，避免模型输出超满分或负分的异常值
     for name, max_score in {**RUBRIC_COMPLETENESS, **RUBRIC_PERFORMANCE}.items():
-        if name in dims:
-            dims[name] = round(max(0.0, min(max_score, dims[name])), 1)
+        if name not in dims:
+            continue
+        detail = dims[name]
+        if isinstance(detail, DimensionDetail):
+            # 兼容模型直接返回「分维度详情」对象的情况
+            detail.score = round(max(0.0, min(max_score, detail.score)), 1)
+            detail.max = float(max_score)
+        else:
+            dims[name] = round(max(0.0, min(max_score, float(detail))), 1)
 
     def _as_str_list(value: Any) -> list[str]:
         return [str(x) for x in value] if isinstance(value, list) else []

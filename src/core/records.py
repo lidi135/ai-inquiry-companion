@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,70 @@ from .scoring_engine import ScoringResult
 # 记录文件名时间戳格式（含微秒，避免同一秒多次保存相互覆盖）
 _TIMESTAMP_FMT = "%Y%m%d_%H%M%S_%f"
 _FRIENDLY_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _probe_writable(path: Path) -> bool:
+    """探测目录是否真的可写（云端容器可能是只读文件系统）。"""
+    probe = path / f".write_probe_{os.getpid()}"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError:
+        return False
+
+
+@lru_cache(maxsize=8)
+def _active_dir(raw: str) -> Path:
+    """返回实际可用的记录目录；默认目录不可写时回退到系统临时目录。"""
+    primary = Path(raw)
+    if _probe_writable(primary):
+        return primary
+    fallback = Path(tempfile.gettempdir()) / "ai_inquiry_records"
+    if _probe_writable(fallback):
+        return fallback
+    return primary
+
+
+def records_dir() -> Path:
+    """当前实际使用的记录目录（只读环境下会自动回退到临时目录）。"""
+    return _active_dir(str(RECORDS_DIR))
+
+
+def build_record(
+    result: ScoringResult,
+    case: Case,
+    *,
+    mode: str = "技能训练",
+    student_id: str = "self",
+    class_id: str = "default",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """构造一条训练记录（不落盘），供保存与界面展示复用。"""
+    now = datetime.now()
+    return {
+        "时间": now.strftime(_FRIENDLY_FMT),
+        "病例": case.display_name,
+        "case_id": case.case_id,
+        "科室": case.department,
+        "难度": case.difficulty,
+        "模式": mode,
+        "student_id": student_id,
+        "class_id": class_id,
+        "session_id": session_id,
+        **result.to_dict(),
+    }
+
+
+def save_record_data(record: dict[str, Any]) -> Path:
+    """把已构造好的记录写入磁盘，返回文件路径。"""
+    directory = records_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    now = datetime.now()
+    path = directory / f"{now.strftime(_TIMESTAMP_FMT)}_{record.get('case_id', 'case')}.json"
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
 
 
 def save_record(
@@ -43,23 +110,15 @@ def save_record(
     Returns:
         已写入的记录文件路径。
     """
-    RECORDS_DIR.mkdir(parents=True, exist_ok=True)
-    now = datetime.now()
-    path = RECORDS_DIR / f"{now.strftime(_TIMESTAMP_FMT)}_{case.case_id}.json"
-    record = {
-        "时间": now.strftime(_FRIENDLY_FMT),
-        "病例": case.display_name,
-        "case_id": case.case_id,
-        "科室": case.department,
-        "难度": case.difficulty,
-        "模式": mode,
-        "student_id": student_id,
-        "class_id": class_id,
-        "session_id": session_id,
-        **result.to_dict(),
-    }
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    record = build_record(
+        result,
+        case,
+        mode=mode,
+        student_id=student_id,
+        class_id=class_id,
+        session_id=session_id,
+    )
+    return save_record_data(record)
 
 
 def load_history(
@@ -78,10 +137,11 @@ def load_history(
     Returns:
         记录字典列表；无记录或读取失败时返回空列表。
     """
-    if not RECORDS_DIR.exists():
+    directory = records_dir()
+    if not directory.exists():
         return []
     records: list[dict[str, Any]] = []
-    for path in sorted(RECORDS_DIR.glob("*.json")):
+    for path in sorted(directory.glob("*.json")):
         try:
             records.append(json.loads(path.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, OSError):
@@ -101,7 +161,7 @@ def load_history(
 def _session_file(session_id: str = "default") -> Path:
     """返回某会话的落盘路径；对会话 ID 做白名单清洗，防止路径穿越。"""
     safe = re.sub(r"[^A-Za-z0-9_-]", "", session_id or "")[:64] or "default"
-    return RECORDS_DIR / "_sessions" / f"{safe}.json"
+    return records_dir() / "_sessions" / f"{safe}.json"
 
 
 def migrate_legacy_session(
@@ -129,7 +189,7 @@ def migrate_legacy_session(
     if isinstance(existing, dict) and (existing.get("messages") or existing.get("report")):
         return existing
 
-    legacy = RECORDS_DIR / "_session" / "current.json"
+    legacy = records_dir() / "_session" / "current.json"
     if not legacy.exists():
         return existing if isinstance(existing, dict) else None
     try:

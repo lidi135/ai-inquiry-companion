@@ -29,11 +29,12 @@ from core.case_generator import generate_case as generate_new_case
 from core.case_loader import Case, load_all_cases
 from core.config import CASES_DIR, MODEL_REGISTRY, TEMPERATURE
 from core.records import (
+    build_record,
     clear_session,
     load_history,
     load_session,
     migrate_legacy_session,
-    save_record,
+    save_record_data,
     save_session,
 )
 from core.role_engine import (
@@ -495,6 +496,14 @@ if "exam_start" not in st.session_state:
 if "real_time_tips_shown" not in st.session_state:
     st.session_state.real_time_tips_shown = set()
 
+# 最近一次评分记录是否成功落盘；None 表示尚未评分或保存成功
+if "record_save_error" not in st.session_state:
+    st.session_state.record_save_error = None
+
+# 上一次评分时的消息条数：同一段对话重复点击「生成评分报告」时不再重复写记录
+if "last_scored_count" not in st.session_state:
+    st.session_state.last_scored_count = None
+
 # 当前病例/模式快照：用于检测切换并重置会话，避免把上一病例的对话带到下一病例
 if "current_case_id" not in st.session_state:
     st.session_state.current_case_id = None
@@ -554,6 +563,8 @@ if case_changed or mode_changed:
     st.session_state.report = None
     st.session_state.exam_start = None
     st.session_state.real_time_tips_shown = set()
+    st.session_state.record_save_error = None
+    st.session_state.last_scored_count = None
     clear_session(session_id)
 st.session_state.current_case_id = case.case_id
 st.session_state.current_mode = mode
@@ -613,6 +624,8 @@ if st.sidebar.button("🔄 重新开始", use_container_width=True):
     st.session_state.report = None
     st.session_state.exam_start = None
     st.session_state.real_time_tips_shown = set()
+    st.session_state.record_save_error = None
+    st.session_state.last_scored_count = None
     clear_session(session_id)
     st.rerun()
 
@@ -693,7 +706,7 @@ def _generate_report(
         report.weaknesses.append("系统检测到虚拟病人在对话中可能存在越界回答，已记录。")
 
     try:
-        save_record(
+        record = build_record(
             report,
             case,
             mode=_mode_label(mode),
@@ -701,9 +714,12 @@ def _generate_report(
             class_id=class_id or "default",
             session_id=session_id,
         )
-    except Exception:
-        # 记录持久化失败不应阻断评分展示
-        pass
+        save_record_data(record)
+        st.session_state.record_save_error = None
+    except Exception as e:
+        # 记录持久化失败不应阻断评分展示，但要明确告知，避免误以为没记录
+        st.session_state.record_save_error = str(e)
+    st.session_state.last_scored_count = len(messages)
     return report
 
 
@@ -727,13 +743,25 @@ def _personal_history(student_id: str, session_id: str) -> list[dict[str, Any]]:
     同时兼容升级前的本地记录（没有 session_id 字段）。
     """
     sid = student_id.strip()
+    all_records = load_history()
     if sid:
-        return load_history(student_id=sid)
-    records = load_history(session_id=session_id)
-    if records:
-        return records
+        records = [r for r in all_records if r.get("student_id", "self") == sid]
+        if records:
+            return records
+        # 学号是后来才填写的：此前记录可能以 "self" 保存于当前会话，回退展示
+        records = [
+            r for r in all_records
+            if r.get("session_id", "") == session_id
+            and r.get("student_id", "self") in ("self", sid)
+        ]
+        if records:
+            return records
+    else:
+        records = [r for r in all_records if r.get("session_id", "") == session_id]
+        if records:
+            return records
     return [
-        r for r in load_history()
+        r for r in all_records
         if not r.get("session_id") and r.get("student_id", "self") == "self"
     ]
 
@@ -967,14 +995,19 @@ with tab_train:
                         else "".join(str(x) for x in raw_reply)
                     )
         except Exception:  # 生成失败时降级为一次性生成
-            with st.chat_message("assistant"):
-                reply = generate_patient_reply(
-                    client,
-                    case,
-                    history=st.session_state.messages,
-                    model=MODEL_REGISTRY[model_key].model,
-                    temperature=TEMPERATURE,
-                )
+            try:
+                with st.chat_message("assistant"):
+                    reply = generate_patient_reply(
+                        client,
+                        case,
+                        history=st.session_state.messages,
+                        model=MODEL_REGISTRY[model_key].model,
+                        temperature=TEMPERATURE,
+                    )
+            except Exception as e:
+                # 降级仍失败：提示错误并终止本轮，避免整页报错中断
+                st.error(f"患者回复生成失败：{e}")
+                st.stop()
 
         st.session_state.messages.append({"role": "assistant", "content": reply})
 
@@ -999,22 +1032,31 @@ with tab_train:
         )
 
     # ---- 评分报告 ----
+    already_scored = (
+        st.session_state.report is not None
+        and st.session_state.get("last_scored_count") == len(st.session_state.messages)
+    )
     col1, col2 = st.columns([1, 1])
     with col1:
         if not is_exam:
-            if st.button("生成评分报告", disabled=len(st.session_state.messages) == 0):
+            if st.button("生成评分报告", disabled=len(st.session_state.messages) == 0 or already_scored):
                 st.session_state.report = _generate_report(
                     case, st.session_state.messages, use_llm_score, model_key, mode,
                     student_id=student_id, class_id=class_id, session_id=session_id,
                 )
                 st.rerun()
         else:
-            if st.button("交卷并生成评分", disabled=(exam_finished or len(st.session_state.messages) == 0)):
+            if st.button(
+                "交卷并生成评分",
+                disabled=(exam_finished or len(st.session_state.messages) == 0 or already_scored),
+            ):
                 st.session_state.report = _generate_report(
                     case, st.session_state.messages, use_llm_score, model_key, mode,
                     student_id=student_id, class_id=class_id, session_id=session_id,
                 )
                 st.rerun()
+        if already_scored:
+            st.caption("当前对话已生成评分；继续提问后可再次生成。")
 
     with col2:
         if st.button("清空评分"):
@@ -1292,7 +1334,12 @@ def _plot_radar(dimensions: Mapping[str, object]):
 
 with tab_train:
     st.markdown("---")
-    with st.expander("个人成长档案", expanded=False):
+    with st.expander("个人成长档案", expanded=True):
+        if st.session_state.get("record_save_error"):
+            st.warning(
+                "本次评分已生成，但训练记录未能写入服务器磁盘，刷新或重启后可能丢失："
+                f"{st.session_state.record_save_error}"
+            )
         history = _personal_history(student_id, session_id)
         if not history:
             st.caption(

@@ -27,19 +27,19 @@ from .case_loader import (
 )
 from .config import (
     CASES_DIR,
-    RECORDS_DIR,
     SCORING_TEMPERATURE,
     get_logger,
     get_model_config,
 )
 from .prompt_registry import get as get_prompt
 from .prompt_registry import get_schema
+from .records import records_dir
 from .role_engine import chat_completion, create_client
 
 logger = get_logger("core.case_generator")
 
-# 缓存目录：放在 records/ 下，避免污染手写病例库 cases/
-_CACHE_DIR = RECORDS_DIR / ".cache"
+# 缓存目录：放在记录目录下（只读环境会自动回退到可写目录），避免污染手写病例库
+_CACHE_DIR = records_dir() / ".cache"
 _CACHE_FILE = _CACHE_DIR / "generated_cases.json"
 
 # 病例必填字段：缺失或空字符串即视为生成失败
@@ -296,9 +296,14 @@ def generate_case(
                     cached_payload = None
             if cached_payload is not None:
                 try:
-                    return parse_generated_case(cached_payload)
+                    cached_case = parse_generated_case(cached_payload)
                 except CaseLoadError:
                     logger.warning("缓存记录已损坏，将重新生成")
+                else:
+                    # 缓存命中也必须校验冲突，避免覆盖后来新增的同号手写病例
+                    if _conflict_with_existing(cached_case, existing) is None:
+                        return cached_case
+                    logger.warning("缓存病例与现有病例冲突，改为重新生成")
 
     cfg = get_model_config(model_key)
     client = create_client(model_key)
@@ -361,9 +366,13 @@ def generate_case(
     if use_cache:
         # 用真实主诉做 key，写入缓存（key 形如 "科室|难度|主诉哈希"）
         real_key = _chief_complaint_hash(case.chief_complaint, department, difficulty)
-        cache = _load_cache()
-        cache[f"{department}|{difficulty}|{real_key}"] = payload
-        _save_cache(cache)
+        try:
+            cache = _load_cache()
+            cache[f"{department}|{difficulty}|{real_key}"] = payload
+            _save_cache(cache)
+        except OSError as e:
+            # 只读文件系统（如云端容器）写缓存失败不应让已生成成功的病例作废
+            logger.warning("生成病例缓存写入失败，本轮结果仍可使用：%s", e)
 
     logger.info("生成新病例 %s：%s / %s", case.case_id, department, difficulty)
     return case

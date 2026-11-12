@@ -260,3 +260,13 @@ def test_parse_llm_score_clamps_dimension_scores():
     assert result.dimensions["现病史"] == 15.0   # 钳制到现病史满分
     assert result.dimensions["既往史"] == 0.0    # 负分钳制到 0
     assert result.dimensions["主诉"] == 4.0       # 正常值不受影响
+
+
+def test_parse_llm_score_clamps_dict_dimension_details():
+    """模型返回「分维度详情」对象时，不能因类型比较抛 TypeError。"""
+    text = '{"总分": 80, "分维度得分": {"主诉": {"得分": 99, "满分": 5}}}'
+    result = parse_llm_score(text)
+    detail = result.dimensions["主诉"]
+    assert isinstance(detail, DimensionDetail)
+    assert detail.score == 5.0
+    assert detail.max == 5.0
